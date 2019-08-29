@@ -1,0 +1,518 @@
+#!/bin/sh
+
+MEDIA_CTL=media-ctl
+V4L2_CTL=v4l2-ctl
+GST=gst-launch-1.0
+
+out() {
+	echo "$@"
+}
+
+dbg() {
+	[ -n "$DEBUG" ] && { echo "$@" 1>&2; }
+}
+
+err() {
+	local ret=$1
+
+	shift
+
+	[ -n "$FORCE" ] && {
+					out "# Error: $@"
+	} || {
+		echo "Error: $@" 1>&2
+		exit $ret
+	}
+}
+
+# link 2 entities together
+# $1 pad1
+# $2 pad2
+# $3 flags
+lnk() {
+	out $MEDIA_CTL -l \""$1 -> $2$3"\"
+}
+
+# format pad
+fmt() {
+	out $MEDIA_CTL --set-v4l2 "\"$1\""
+}
+
+# mode0: sensor -> mux -> csi -> /dev/videoN
+# raw capture
+mode0() {
+	EP="ipu${IPU}_csi${CSI}"
+	EPP=2
+	[ $SOC = imx6q ] && p=1 || p=4
+
+	out "# setup links"
+	lnk "'$SENSOR':0" "'ipu${IPU}_csi${CSI}_mux':$p" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}_mux':$((p+1))" "'$EP':0" "[1]"
+	lnk "'$EP':$EPP" "'$EP capture':0" "[1]"
+
+	out "# configure pads"
+	case "$SENS" in
+		adv7180)
+			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:alternate]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:UYVY2X8/$res]"
+			# rec709 config at CSI pad 0
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+			# CSI src pad output is frame height
+			h=$((h*2))
+			res=${w}x${h}
+			fmt "'$EP':$EPP [fmt:AYUV32/$res]"
+			# Error: gstreamer: Device does not support progressive interlacing
+			;;
+		tda1997x)
+			fmt "'$SENSOR':0 [fmt:$fmt field:$field]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:$fmt field:$field]"
+			# rec709 config at CSI pad 0
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+			fmt "'$EP':$EPP [fmt:AYUV32/$res]"
+			out "$MEDIA_CTL --get-v4l2 '\"$EP\":$EPP'"
+			;;
+	esac
+}
+
+# mode1: sensor -> mux -> csi -> ic_prp -> ic_prpenc -> /dev/videoN
+# IC enc CSC/Scale/interweave
+mode1() {
+	EP="ipu${IPU}_ic_prpenc"
+	EPP=1
+	[ $SOC = imx6q ] && p=1 || p=4
+
+	out "# setup links"
+	lnk "'$SENSOR':0" "'ipu${IPU}_csi${CSI}_mux':$p" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}_mux':$((p+1))" "'ipu${IPU}_csi${CSI}':0" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}':1" "'ipu${IPU}_ic_prp':0" "[1]"
+	lnk "'ipu${IPU}_ic_prp':1" "'$EP':0" "[1]"
+	lnk "'$EP':1" "'$EP capture':0" "[1]"
+
+	out "# configure pads"
+	case "$SENS" in
+		adv7180)
+			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:alternate]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:UYVY2X8/$res]"
+			# rec709 config at CSI pad 0
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+			# CSI src pad output is frame height
+			h=$((h*2))
+			res=${w}x${h}
+			fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+			fmt "'ipu${IPU}_ic_prp':1 [fmt:AYUV32/$res]"
+			fmt "'$EP':1 [fmt:AYUV32/$res]"
+			# Error: gstreamer: Device does not support progressive interlacing
+			;;
+		tda1997x)
+			[ "$fcc" = "UYVY8_1X16" ] && {
+					err 1 "Invalid mode: 16bit capture (passthrough) can't go through IC"
+			}
+			fmt "'$SENSOR':0 [fmt:$fmt field:$field]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:$fmt field:$field]"
+			[ "$w" -ge 1024 -o "$h" -ge 1024 ] && {
+				# downscale CSI resolution
+				res="$((w/2))x$((h/2))"
+				dbg "Adjusting resolution from ${w}x${h} to $res"
+				fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+				#fmt "'ipu${IPU}_csi${CSI}':0 [crop:(0,0)/$res]"
+				#fmt "'ipu${IPU}_csi${CSI}':0 [compose:(0,0)/$res]"
+				fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+				fmt "'ipu${IPU}_ic_prp':1 [fmt:AYUV32/$res]"
+				fmt "'$EP':1 [fmt:AYUV32/$res]"
+			} || {
+				fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+				fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+				fmt "'ipu${IPU}_ic_prp':1 [fmt:AYUV32/$res]"
+				fmt "'$EP':1 [fmt:AYUV32/$res]"
+				out "$MEDIA_CTL --get-v4l2 '\"$EP\":1'"
+			}
+			;;
+	esac
+}
+
+# mode2: sensor -> mux -> csi -> ic_prp -> ic_prpvf -> /dev/videoN
+# IC vf CSC/Scale/interweave (same as mode1 but using vf instead of enc)
+mode2() {
+	EP="ipu${IPU}_ic_prpvf"
+	EPP=1
+	[ $SOC = imx6q ] && p=1 || p=4
+
+	out "# setup links"
+	lnk "'$SENSOR':0" "'ipu${IPU}_csi${CSI}_mux':$p" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}_mux':$((p+1))" "'ipu${IPU}_csi${CSI}':0" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}':1" "'ipu${IPU}_ic_prp':0" "[1]"
+	lnk "'ipu${IPU}_ic_prp':2" "'$EP':0" "[1]"
+	lnk "'$EP':1" "'$EP capture':0" "[1]"
+
+	out "# configure pads"
+	case "$SENS" in
+		adv7180)
+			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:alternate]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:UYVY2X8/$res]"
+			# rec709 config at CSI pad 0
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+			# CSI src pad output is frame height
+			h=$((h*2))
+			res=${w}x${h}
+			fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+			fmt "'ipu${IPU}_ic_prp':2 [fmt:AYUV32/$res]"
+			fmt "'$EP':1 [fmt:AYUV32/$res]"
+			# Error: gstreamer: Device does not support progressive interlacing
+			;;
+		tda1997x)
+			[ "$fcc" = "UYVY8_1X16" ] && {
+					err 1 "Invalid mode: 16bit capture (passthrough) can't go through IC"
+			}
+			fmt "'$SENSOR':0 [fmt:$fmt field:$field]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:$fmt field:$field]"
+			# rec709 config at CSI pad 0
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+			[ "$w" -ge 1024 -o "$h" -ge 1024 ] && {
+				# downscale CSI resolution
+				res="$((w/2))x$((h/2))"
+				dbg "Adjusting resolution from ${w}x${h} to $res"
+				fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+				#fmt "'ipu${IPU}_csi${CSI}':0 [crop:(0,0)/$res]"
+				#fmt "'ipu${IPU}_csi${CSI}':0 [compose:(0,0)/$res]"
+				fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+				fmt "'ipu${IPU}_ic_prp':2 [fmt:AYUV32/$res]"
+				fmt "'$EP':1 [fmt:AYUV32/$res]"
+			} || {
+				fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+				fmt "'ipu${IPU}_ic_prp':2 [fmt:AYUV32/$res]"
+				fmt "'$EP':1 [fmt:AYUV32/$res]"
+				out "$MEDIA_CTL --get-v4l2 '\"$EP\":1'"
+			}
+			;;
+	esac
+}
+
+# mode3: sensor -> mux -> csi -> vdic -> ic_prp -> ic_prpvf -> /dev/videoN
+# IC vf CSC/Scale/interweave with motion compensated de-interlace
+mode3() {
+	EP="ipu${IPU}_ic_prpvf"
+	EPP=1
+	[ $SOC = imx6q ] && p=1 || p=4
+
+	[ "$fld" = "progressive" ] && {
+		err 1 "Invalid mode: VDIC does not accept progressive video"
+	}
+
+	out "# setup links"
+	lnk "'$SENSOR':0" "'ipu${IPU}_csi${CSI}_mux':$p" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}_mux':$((p+1))" "'ipu${IPU}_csi${CSI}':0" "[1]"
+	lnk "'ipu${IPU}_csi${CSI}':1" "'ipu${IPU}_vdic':0" "[1]"
+	lnk "'ipu${IPU}_vdic':2" "'ipu${IPU}_ic_prp':0" "[1]"
+	lnk "'ipu${IPU}_ic_prp':2" "'$EP':0" "[1]"
+	lnk "'$EP':1" "'$EP capture':0" "[1]"
+
+	out "# configure pads"
+	case "$SENS" in
+		adv7180)
+			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:alternate]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:UYVY2X8/$res]"
+			# rec709 config at CSI pad 0
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
+			# CSI src pad output is frame height
+			h=$((h*2))
+			res=${w}x${h}
+			fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+			fmt "'ipu${IPU}_vdic':2 [fmt:AYUV32/$res field:none]"
+			fmt "'ipu${IPU}_ic_prp':2 [fmt:AYUV32/$res field:none]"
+			fmt "'$EP':1 [fmt:AYUV32/$res]"
+			;;
+		tda1997x)
+			fmt "'$SENSOR':0 [fmt:$fmt field:$field]"
+			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:$fmt field:$field]"
+			fmt "'ipu${IPU}_csi${CSI}':1 [fmt:AYUV32/$res]"
+			fmt "'ipu${IPU}_vdic':2 [fmt:AYUV32/$res]"
+			fmt "'ipu${IPU}_ic_prp':2 [fmt:AYUV32/$res]"
+			fmt "'$EP':1 [fmt:AYUV32/$res]"
+			;;
+	esac
+}
+
+# return entity/pad format (all or specific field)
+# $1 entity
+# $2 optional parameter (fmt|fcc|res|int|field|colorspace)
+#		(will return entire fmt if empty)
+get_format_param() {
+	local sensor="$1"
+	local param="$2"
+	local fmt name val int res fcc
+
+	# v4l-utils 1.16.1: [fmt:UYVY8_1X16/1280x720 field:none colorspace:rec709]
+	fmt=$($MEDIA_CTL --get-v4l2 "$sensor" | sed -n 's/.*\[\(.*\)\]/\1/p')
+	dbg "get_format_param: $sensor [$fmt]"
+	[ -z "$param" ] && {
+		echo $fmt
+		return
+	}
+	for i in $fmt; do
+		name=$(echo "$i" | sed -n 's/\(.*\):.*/\1/p')
+		val=$(echo "$i" | sed -n 's/.*:\(.*\)/\1/p')
+		[ "$param" = "$name" ] && {
+			echo $val
+			return
+		}
+		[ "$name" = "fmt" ] && {
+			fcc=$(echo "$val" | awk -F '/' '{print $1}')
+			res=$(echo "$val" | awk -F '/' '{print $2}')
+			int=$(echo "$val" | awk -F '@' '{print $2}')
+			[ -n "$int" ] && {
+				res=$(echo "$res" | awk -F '@' '{print $1}')
+			}
+			case "$param" in
+				fcc) echo "$fcc"; return;;
+				res) echo "$res"; return;;
+				int) echo "$int"; return;;
+			esac
+		}
+	done
+}
+
+# obtain entity/pad format
+# TODO: replace with get_format_param usage
+get_sensor_format() {
+	local sensor="$1"
+	local subdev="$($MEDIA_CTL -e "$sensor")"
+
+	dbg "get_sensor_format: sensor='$sensor' subdev=$subdev"
+	# Get framerate and std (sets the following vars):
+	#	 std=NTSC|PAL
+	#	 framerate=29.9
+	#	 w=720
+	#	 h=480|576
+	#	 fld="seq-bt"
+	#	 res=${w}x${h}
+	#	 pixelclock=calculated
+	case "$sensor" in
+		# for SD encoders:
+		#  TODO: get-detected-standard not detecting switch between PAL/NTSC
+		#   use 'v4l2-ctl --get-detected-standard' (VIDIOC_QUERYSTD) to get
+		#       received std.
+		#   use 'v4l2-ctl --get-standard' (VIDIOC_G_STD) to get selected std
+		#   use 'v4l2-ctl --set-standard' (VIDIOC_S_STD) to set selected std
+		adv7180*)
+			csc=YUV
+			#fmt="$($V4L2_CTL --device $subdev --get-standard)"
+			# TODO: 'Video standard = 0x00000000' means no signal
+			#[ $? -ne 0 ] && { err 2 "v4l-utils 1.16 required for subdev support"; }
+			fmt=$STD
+			case $fmt in
+				*NTSC*)
+					std=NTSC
+					framerate=29.9
+					w=720
+					h=480
+					fld="seq-bt"
+					res=${w}x${h}
+					pixelclock=$((w*h*2*30))
+					;;
+				*PAL*)
+					std=PAL
+					framerate=24.9
+					w=720
+					h=576
+					fld="seq-tb"
+					res=${w}x${h}
+					pixelclock=$((w*h*2*30))
+					;;
+				*) err 2 "unknown standard or no input: $fmt";;
+			esac
+			out "# sensor standard"
+			#out $V4L2_CTL --device $subdev --get-detected-standard \# $std
+			out $V4L2_CTL --device $subdev --set-standard $std
+			;;
+		# for DV encoders:
+		#    use 'v4l2-ctl --get-dv-timings' detailed timing data
+		tda1997*)
+			fmt="$($V4L2_CTL --device $subdev --get-dv-timings)"
+			pixelclock="$(echo "$fmt" | sed -n 's/.*Pixelclock: \(.*\) Hz.*/\1/p')"
+			framerate="$(echo "$fmt" | sed -n 's/.*(\(.*\) frames.*/\1/p')"
+			fld="$(echo "$fmt" | sed -n 's/.*Frame format: \(.*\)/\1/p')"
+			out "# get framerate"
+			out $V4L2_CTL --device $subdev --get-dv-timings \# $res $fld $framerate
+			;;
+	esac
+	dbg "fmt=$fmt"
+	dbg "std=$std"
+	dbg "res=$res"
+	dbg "fld=$fld"
+	dbg "framerate=$framerate"
+	dbg "pixelclock=$pixelclock"
+
+	# media-ctl --get-v4l2 will return fcc/res/field/colorspace
+	fmt=$($MEDIA_CTL --get-v4l2 "'$sensor':0" | sed -n 's/.*\[\(.*\)\]/\1/p')
+	SENS_FMT=$fmt
+	#out "# sensor format"
+	#out $MEDIA_CTL --get-v4l2 \'\"$sensor\":0\' \# $SENS_FMT
+	for i in $fmt; do
+		name=$(echo "$i" | sed -n 's/\(.*\):.*/\1/p')
+		val=$(echo "$i" | sed -n 's/.*:\(.*\)/\1/p')
+		eval $name="$val"
+		[ "$name" = "fmt" ] && {
+			fcc=$(echo "$val" | awk -F '/' '{print $1}')
+			res=$(echo "$val" | awk -F '/' '{print $2}')
+			int=$(echo "$val" | awk -F '@' '{print $2}')
+			[ -n "$int" ] && {
+				res=$(echo "$res" | awk -F '@' '{print $1}')
+			}
+			w=$(echo "$res" | awk -F 'x' '{print $1}')
+			h=$(echo "$res" | awk -F 'x' '{print $2}')
+		}
+
+		[ "$name" = "field" ] && {
+			[ "$val" = "none" ] && {
+				src=${h}p
+			} || {
+				src=${h}i
+			}
+		}
+		[ "$name" = "colorspace" ] && {
+			case "$val" in
+				rec709) csc=YUV;;
+				srgb) csc=RGB;;
+			esac
+		}
+		#dbg "$name=$val"
+	done
+
+	dbg "	fld:$field"
+	dbg "	fmt:$fmt"
+	dbg "	fcc:$fcc"
+	dbg "	res:$res (width=$w height=$h)"
+	dbg "	int:$int"
+	dbg "	csc:$colorspace"
+}
+
+adv7180_setup() {
+	# parse sensor format into vars
+	get_sensor_format "$SENSOR" 
+}
+
+# set and detect current HDMI input source, break it down to its components
+# (such as pixel format, resolution, field, and colorspace) and assign
+# them to variables for later use
+tda1997x_setup() {
+	# set output format to detected input format
+	out "# set sensor output pad to sensor source format"
+	$V4L2_CTL -d $SUBDEV --set-dv-bt-timings=query > /dev/null
+	out $V4L2_CTL -d $SUBDEV --set-dv-bt-timings=query
+
+	# parse sensor format into vars
+	get_sensor_format "$SENSOR"
+}
+
+# Get SOC and BOARD from dt unless passed in
+SOC=${SOC:-$(sed -n 's/gw,\(imx6.*\)-.*/\1/p' /proc/device-tree/compatible)}
+BOARD=${BOARD:-$(sed -n 's/gw,imx6.*-\(gw.*\)gw,ventana.*/\1/p' /proc/device-tree/compatible)}
+SENSOR=${1:-adv7180}
+STD=${2:-NTSC}
+
+dbg "BOARD=$BOARD"
+dbg "SOC=$SOC"
+dbg "SENSOR=$SENSOR"
+
+# if IPUCSI not provided, determine it from BOARD/SOC/SENSOR
+[ -z "${IPU}" -o -z "${CSI}" ] && {
+	dbg "Determining IPU and CSI for ${SOC}-${BOARD}-${SENSOR}..."
+	case "${SOC}-${BOARD}-${SENSOR}" in
+		imx6q-gw54xx-adv7180|\
+		imx6q-gw53xx-adv7180|\
+		imx6q-gw52xx-adv7180)
+			IPU=2
+			CSI=1
+			;;
+		imx6dl-gw52xx-adv7180|\
+		imx6dl-gw53xx-adv7180)
+			IPU=1
+			CSI=1
+			;;
+		imx6q-gw51xx-adv7180|\
+		imx6q-gw553x-adv7180|\
+		imx6dl-gw51xx-adv7180|\
+		imx6dl-gw553x-adv7180|\
+		imx6dl-gw551x-tda1997x|\
+		imx6q-gw551x-tda1997x|\
+		imx6q-gw54xx-tda1997x)
+			IPU=1
+			CSI=0
+			;;
+		*)
+			err 1 "Unrecognized board/soc/sensor: '${SOC}-${BOARD}-${SENSOR}'"
+			;;
+	esac
+	case "${SENSOR}" in
+		adv7180)
+			SENS=$SENSOR
+			SENSOR="adv7180 2-0020"
+			# use VDIC pipeline for Analog CVBS capture
+			MODE=${MODE:-3}
+			;;
+		tda1997x)
+			SENS=$SENSOR
+			SENSOR="tda19971 2-0048"
+			# use RAW pipeline for Digital HDMI capture
+			MODE=${MODE:-0}
+			;;
+	esac
+}
+SUBDEV=$($MEDIA_CTL -e "$SENSOR")
+dbg "SUBDEV=$SUBDEV"
+
+# create graphs (txt/dot/png) in $DIR if exists
+[ -n "$DIR" -a -d "$DIR" ] && {
+	$MEDIA_CTL --reset
+	$MEDIA_CTL --print-topology > ${DIR}/${SOC}-${BOARD}-media.txt
+	$MEDIA_CTL --print-dot > ${DIR}/${SOC}-${BOARD}-media.dot
+	[ -x /usr/bin/dot ] && /usr/bin/dot -Tpng \
+		${DIR}/${SOC}-${BOARD}-media.dot \
+		> ${DIR}/${SOC}-${BOARD}-media.png
+}
+
+# Mode:
+#	There are multiple basic IMX6 pipelines which we will specify by a mode var:
+#	0: sensor -> mux -> csi -> /dev/videoN
+#	1: sensor -> mux -> csi -> ic_prp -> ic_prpenc -> /dev/videoN
+#	2: sensor -> mux -> csi -> ic_prp -> ic_prpvf -> /dev/videoN
+#	3: sensor -> mux -> csi -> vdic -> ic_prp -> ic_prpvf -> /dev/videoN
+MODE=${MODE:-0}
+case $MODE in
+	0) MODE_DESC="sensor->mux->csi";;
+	1) MODE_DESC="sensor->mux->csi->ic_prp->ic_prpenc";;
+	2) MODE_DESC="sensor->mux->csi->ic_prp->ic_prpvf";;
+	3) MODE_DESC="sensor->mux->csi->vdic->ic_prp->ic_prpvf";;
+	*) err 1 "invalid MODE:$MODE";;
+esac
+
+dbg "IPUCSI=ipu${IPU}_csi${CSI} MODE$MODE:$MODE_DESC"
+
+out "#!/bin/sh"
+out ""
+out "# ${SOC}-${BOARD} ${SENS} IPU${IPU}_CSI${CSI} MODE$MODE:$MODE_DESC"
+out ""
+
+# perform any sensor specific setup
+${SENS}_setup
+
+out ""
+out "#"
+out "# ${SOC}-${BOARD} IPU${IPU}_CSI${CSI} ${SENS} $fcc ${src}@${framerate}Hz $csc MODE${MODE}:$MODE_DESC $(uname -r)"
+out "#"
+out "# reset all links"
+out "$MEDIA_CTL --reset"
+
+# setup links, formats, and EP (endpoint entity)
+mode${MODE}
+dbg "EP=$EP"
+# set v4l2 capture device
+DEVICE=$($MEDIA_CTL -e "$EP capture")
+out "# capture device"
+out $MEDIA_CTL -e "'$EP capture'" \# $DEVICE
+[ "$SENS" = "adv7180" -a "$MODE" -ne "3" ] && {
+	out "# configure video device"
+	out $V4L2_CTL --device $DEVICE --set-fmt-video=field=interlaced_bt
+}
+out "export DEVICE=$DEVICE"
+
