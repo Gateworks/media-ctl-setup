@@ -509,11 +509,25 @@ mode${MODE}
 dbg "EP=$EP"
 # set v4l2 capture device
 DEVICE=$($MEDIA_CTL -e "$EP capture")
-out "# capture device"
-out $MEDIA_CTL -e "'$EP capture'" \# $DEVICE
+out "# devices"
 [ "$SENS" = "adv7180" -a "$MODE" -ne "3" ] && {
 	out "# configure video device"
 	out $V4L2_CTL --device $DEVICE --set-fmt-video=field=interlaced_bt
 }
-out "export DEVICE=$DEVICE"
+
+ENCODER=/dev/$(for i in $(ls -d /sys/class/video4linux/video*); do [ "coda-encoder" = "$(cat $i/name)" ] && basename $i; done)
+DECODER=/dev/$(for i in $(ls -d /sys/class/video4linux/video*); do [ "coda-decoder" = "$(cat $i/name)" ] && basename $i; done)
+MEM2MEM=/dev/$(for i in $(ls -d /sys/class/video4linux/video*); do [ "ipu_ic_pp mem2mem" = "$(cat $i/name)" ] && basename $i; done)
+GST_CONVERT=$(gst-inspect-1.0 | grep -e "v4l2.*convert*" | sed -e 's/.*:\s*\(v4l2.*convert\):.*/\1/')
+
+out "echo DEVICE=$DEVICE"
+out "echo ENCODER=$ENCODER"
+out "echo DECODER=$DECODER"
+out "echo MEM2MEM=$MEM2MEM"
+out "echo GST_CONVERT=$GST_CONVERT"
+out "export DEVICE=$DEVICE # capture"
+out "export ENCODER=$ENCODER # encode"
+out "export DECODER=$DECODER # decode"
+out "export MEM2MEM=$MEM2MEM # converter"
+out "export GST_CONVERT=$GST_CONVERT # GST converter"
 
