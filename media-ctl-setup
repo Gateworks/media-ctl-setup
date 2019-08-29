@@ -322,7 +322,8 @@ get_sensor_format() {
 			esac
 			out "# sensor standard"
 			#out $V4L2_CTL --device $subdev --get-detected-standard \# $std
-			out $V4L2_CTL --device $subdev --set-standard $std
+			out $V4L2_CTL --device $subdev --set-standard $std > /dev/null
+			out $V4L2_CTL --device $subdev --get-detected-standard # display std
 			;;
 		# for DV encoders:
 		#    use 'v4l2-ctl --get-dv-timings' detailed timing data
