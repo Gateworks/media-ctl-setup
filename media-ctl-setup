@@ -53,15 +53,11 @@ mode0() {
 	out "# configure pads"
 	case "$SENS" in
 		adv7180)
-			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:alternate]"
+			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:seq-tb]"
 			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:UYVY2X8/$res]"
 			# rec709 config at CSI pad 0
-			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:$field colorspace:rec709 ycbcr:709]"
-			# CSI src pad output is frame height
-			h=$((h*2))
-			res=${w}x${h}
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:none colorspace:rec709 ycbcr:709]"
 			fmt "'$EP':$EPP [fmt:AYUV32/$res]"
-			# Error: gstreamer: Device does not support progressive interlacing
 			;;
 		tda1997x)
 			fmt "'$SENSOR':0 [fmt:$fmt field:$field]"
