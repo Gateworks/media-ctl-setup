@@ -56,7 +56,7 @@ mode0() {
 			fmt "'$SENSOR':0 [fmt:UYVY2X8/$res field:seq-tb]"
 			fmt "'ipu${IPU}_csi${CSI}_mux':$((p+1)) [fmt:UYVY2X8/$res]"
 			# rec709 config at CSI pad 0
-			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:$fmt field:none colorspace:rec709 ycbcr:709]"
+			fmt "'ipu${IPU}_csi${CSI}':0 [fmt:UYVY8_2X8/$res@1001/60000 field:none colorspace:rec709 ycbcr:709]"
 			fmt "'$EP':$EPP [fmt:AYUV32/$res]"
 			;;
 		tda1997x)
